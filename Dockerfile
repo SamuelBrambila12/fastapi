@@ -19,10 +19,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copiar requirements y usar pip
+# Copiar requirements y usar pip (copiamos primero para aprovechar cache)
 COPY requirements.txt .
 
 RUN pip install --upgrade pip setuptools wheel
+
+# Instala numpy compatible con tensorflow 2.20 antes de instalar el resto
+# (evita conflictos de resolución)
+RUN pip install --no-cache-dir "numpy>=1.26.0,<1.27"
+
+# Ahora instala el resto de paquetes (requirements.txt ya no contiene numpy)
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copiar todo el código
