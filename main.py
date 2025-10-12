@@ -2,8 +2,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import os
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 import tensorflow as tf
 import numpy as np
 from PIL import Image
@@ -22,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Variables globales
 model = None
-MODEL_INPUT_SIZE = (480, 480)
+MODEL_INPUT_SIZE = (224, 224)  # reducido para modelos más pequeños
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 class ModelManager:
@@ -32,30 +30,47 @@ class ModelManager:
         self.loading_lock = asyncio.Lock()
     
     async def load_model(self):
-        """Carga el modelo preentrenado de forma asíncrona"""
+        """Carga el modelo preentrenado de forma asíncrona (EfficientNetV2-S, con fallback)."""
         async with self.loading_lock:
             if self.model_loaded:
                 return True
                 
             try:
-                logger.info("Cargando modelo EfficientNetV2-L (ImageNet)...")
+                logger.info("Cargando modelo EfficientNetV2-S (ImageNet) input 224x224...")
                 # Ejecutar la carga del modelo en un thread para no bloquear el event loop
                 loop = asyncio.get_event_loop()
                 self.model = await loop.run_in_executor(
                     None,
-                    lambda: tf.keras.applications.EfficientNetV2L(
+                    lambda: tf.keras.applications.EfficientNetV2S(
                         weights='imagenet',
                         include_top=True,
-                        input_shape=(480, 480, 3)
+                        input_shape=(MODEL_INPUT_SIZE[0], MODEL_INPUT_SIZE[1], 3)
                     )
                 )
                 self.model_loaded = True
-                logger.info("Modelo cargado exitosamente")
+                logger.info("Modelo EfficientNetV2-S cargado exitosamente")
                 return True
             except Exception as e:
-                logger.error(f"Error cargando modelo: {e}")
-                self.model_loaded = False
-                return False
+                logger.error(f"Error cargando EfficientNetV2-S: {e}")
+                # Intentar fallback más pequeño
+                try:
+                    logger.info("Intentando cargar fallback MobileNetV2 (imagenet, 224x224)...")
+                    loop = asyncio.get_event_loop()
+                    self.model = await loop.run_in_executor(
+                        None,
+                        lambda: tf.keras.applications.MobileNetV2(
+                            weights='imagenet',
+                            include_top=True,
+                            input_shape=(MODEL_INPUT_SIZE[0], MODEL_INPUT_SIZE[1], 3)
+                        )
+                    )
+                    self.model_loaded = True
+                    logger.info("Fallback MobileNetV2 cargado exitosamente")
+                    return True
+                except Exception as e2:
+                    logger.error(f"Error cargando fallback MobileNetV2: {e2}")
+                    self.model_loaded = False
+                    return False
     
     async def get_model(self):
         """Obtiene el modelo, cargándolo si es necesario"""
@@ -71,6 +86,7 @@ async def lifespan(app: FastAPI):
     """Manejador del ciclo de vida de la aplicación"""
     # Startup
     logger.info("Iniciando aplicación...")
+    # (Opcional) cargar en startup; si prefieres cargar en background, reemplaza por create_task
     await model_manager.load_model()
     yield
     # Shutdown
@@ -152,7 +168,7 @@ def _preprocess_image_sync(image: Image.Image) -> np.ndarray:
     if image.mode != 'RGB':
         image = image.convert('RGB')
     
-    # Redimensionar a 224x224
+    # Redimensionar a MODEL_INPUT_SIZE
     image = image.resize(MODEL_INPUT_SIZE, Image.Resampling.LANCZOS)
     
     # Convertir a array numpy
@@ -211,7 +227,7 @@ async def health_check():
     return {
         "status": "healthy" if model_manager.model_loaded else "unhealthy",
         "model_loaded": model_manager.model_loaded,
-        "model_type": "EfficientNetV2L",
+        "model_type": "EfficientNetV2S",
         "input_size": MODEL_INPUT_SIZE,
         "tensorflow_version": tf.__version__,
         "max_file_size_mb": MAX_FILE_SIZE // (1024 * 1024)
@@ -530,5 +546,6 @@ if __name__ == "__main__":
         "main:app",  # Usar import string para enable reload
         host="0.0.0.0", 
         port=8000,
-        log_level="info"
+        log_level="info",
+        reload=True
     )
