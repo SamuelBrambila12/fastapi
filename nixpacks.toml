@@ -1,0 +1,27 @@
+# nixpacks.toml (colócalo en la raíz del repo)
+[phases.setup]
+# paquetes apt necesarios para evitar errores de build (distutils + dependencias de Pillow/numpy)
+aptPkgs = [
+  "python3-distutils",
+  "build-essential",
+  "pkg-config",
+  "libjpeg-dev",
+  "zlib1g-dev",
+  "libpng-dev",
+  "libtiff5-dev"
+]
+
+[phases.install]
+# crear venv y actualizar pip/setuptools/wheel antes de instalar requirements
+cmds = [
+  "python -m venv /opt/venv",
+  "export PATH=/opt/venv/bin:$PATH",
+  "pip install --upgrade pip setuptools wheel"
+]
+
+[phases.build]
+# instalar dependencias del proyecto usando el venv creado
+cmds = [
+  "export PATH=/opt/venv/bin:$PATH",
+  "pip install --prefer-binary -r requirements.txt"
+]
