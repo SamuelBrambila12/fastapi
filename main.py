@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Variables globales
 model = None
-MODEL_INPUT_SIZE = (224, 224)  # reducido para modelos más pequeños
+MODEL_INPUT_SIZE = (384, 384)  # cambiado a 384x384 para EfficientNetV2-S
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 class ModelManager:
@@ -28,17 +28,20 @@ class ModelManager:
         self.model = None
         self.model_loaded = False
         self.loading_lock = asyncio.Lock()
+        self.model_type: Optional[str] = None
+        self.preprocess_fn = None  # se asignará tras cargar el modelo
     
     async def load_model(self):
-        """Carga el modelo preentrenado de forma asíncrona (EfficientNetV2-S, con fallback)."""
+        """Carga el modelo preentrenado de forma asíncrona:
+           intenta EfficientNetV2-S (384x384) y, si falla, MobileNetV3Large (224x224)."""
         async with self.loading_lock:
             if self.model_loaded:
                 return True
                 
+            loop = asyncio.get_event_loop()
+            # Intento principal: EfficientNetV2-S (384x384)
             try:
-                logger.info("Cargando modelo EfficientNetV2-S (ImageNet) input 224x224...")
-                # Ejecutar la carga del modelo en un thread para no bloquear el event loop
-                loop = asyncio.get_event_loop()
+                logger.info("Cargando modelo EfficientNetV2-S (ImageNet) input 384x384...")
                 self.model = await loop.run_in_executor(
                     None,
                     lambda: tf.keras.applications.EfficientNetV2S(
@@ -47,30 +50,35 @@ class ModelManager:
                         input_shape=(MODEL_INPUT_SIZE[0], MODEL_INPUT_SIZE[1], 3)
                     )
                 )
+                # Preprocesador apropiado para EfficientNetV2
+                self.preprocess_fn = tf.keras.applications.efficientnet_v2.preprocess_input
+                self.model_type = "EfficientNetV2S"
                 self.model_loaded = True
                 logger.info("Modelo EfficientNetV2-S cargado exitosamente")
                 return True
             except Exception as e:
                 logger.error(f"Error cargando EfficientNetV2-S: {e}")
-                # Intentar fallback más pequeño
-                try:
-                    logger.info("Intentando cargar fallback MobileNetV2 (imagenet, 224x224)...")
-                    loop = asyncio.get_event_loop()
-                    self.model = await loop.run_in_executor(
-                        None,
-                        lambda: tf.keras.applications.MobileNetV2(
-                            weights='imagenet',
-                            include_top=True,
-                            input_shape=(MODEL_INPUT_SIZE[0], MODEL_INPUT_SIZE[1], 3)
-                        )
+
+            # Fallback: MobileNetV3Large (usa 224x224 internamente; seguiremos redimensionando a MODEL_INPUT_SIZE)
+            try:
+                logger.info("Intentando cargar fallback MobileNetV3Large (ImageNet)...")
+                self.model = await loop.run_in_executor(
+                    None,
+                    lambda: tf.keras.applications.MobileNetV3Large(
+                        weights='imagenet',
+                        include_top=True,
+                        input_shape=(224, 224, 3)
                     )
-                    self.model_loaded = True
-                    logger.info("Fallback MobileNetV2 cargado exitosamente")
-                    return True
-                except Exception as e2:
-                    logger.error(f"Error cargando fallback MobileNetV2: {e2}")
-                    self.model_loaded = False
-                    return False
+                )
+                self.preprocess_fn = tf.keras.applications.mobilenet_v3.preprocess_input
+                self.model_type = "MobileNetV3Large"
+                self.model_loaded = True
+                logger.info("Fallback MobileNetV3Large cargado exitosamente")
+                return True
+            except Exception as e2:
+                logger.error(f"Error cargando fallback MobileNetV3Large: {e2}")
+                self.model_loaded = False
+                return False
     
     async def get_model(self):
         """Obtiene el modelo, cargándolo si es necesario"""
@@ -84,12 +92,11 @@ model_manager = ModelManager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manejador del ciclo de vida de la aplicación"""
-    # Startup
     logger.info("Iniciando aplicación...")
-    # (Opcional) cargar en startup; si prefieres cargar en background, reemplaza por create_task
+    # Puedes cambiar a background con: asyncio.create_task(model_manager.load_model())
+    # Si tu contenedor tiene memoria ajustada, podrías preferir no bloquear el startup.
     await model_manager.load_model()
     yield
-    # Shutdown
     logger.info("Cerrando aplicación...")
 
 app = FastAPI(
@@ -113,23 +120,18 @@ def validate_image_file(file: UploadFile) -> bool:
     logger.info(f"🔍 Validando archivo: {file.filename}")
     logger.info(f"📋 Content-Type: {file.content_type}")
     
-    # Lista de content-types permitidos (más completa)
     allowed_content_types = [
         "image/jpeg", "image/jpg", "image/png", "image/bmp", 
         "image/gif", "image/tiff", "image/webp", "image/x-ms-bmp",
-        "application/octet-stream"  # A veces los archivos vienen así
+        "application/octet-stream"
     ]
-    
-    # Lista de extensiones permitidas
     allowed_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.webp']
     
-    # Obtener extensión del archivo
     file_extension = ""
     if file.filename:
         file_extension = os.path.splitext(file.filename.lower())[1]
         logger.info(f"📎 Extensión detectada: {file_extension}")
     
-    # Validación más flexible: si tiene extensión válida O content-type válido
     content_type_valid = file.content_type and (
         file.content_type in allowed_content_types or 
         file.content_type.startswith("image/")
@@ -140,7 +142,6 @@ def validate_image_file(file: UploadFile) -> bool:
     logger.info(f"✅ Content-type válido: {content_type_valid}")
     logger.info(f"✅ Extensión válida: {extension_valid}")
     
-    # Aceptar si cualquiera de las dos validaciones pasa
     is_valid = content_type_valid or extension_valid
     
     if not is_valid:
@@ -155,7 +156,6 @@ def validate_image_file(file: UploadFile) -> bool:
 async def preprocess_image(image: Image.Image) -> np.ndarray:
     """Preprocesa la imagen para el modelo de forma asíncrona"""
     try:
-        # Ejecutar el preprocesamiento en un thread para no bloquear
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _preprocess_image_sync, image)
     except Exception as e:
@@ -168,7 +168,7 @@ def _preprocess_image_sync(image: Image.Image) -> np.ndarray:
     if image.mode != 'RGB':
         image = image.convert('RGB')
     
-    # Redimensionar a MODEL_INPUT_SIZE
+    # Redimensionar a MODEL_INPUT_SIZE (si el modelo de fallback requiere 224, TF aceptará el input; MobileNetV3 se ajusta internamente)
     image = image.resize(MODEL_INPUT_SIZE, Image.Resampling.LANCZOS)
     
     # Convertir a array numpy
@@ -177,8 +177,12 @@ def _preprocess_image_sync(image: Image.Image) -> np.ndarray:
     # Expandir dimensiones para batch
     img_array = tf.expand_dims(img_array, 0)
     
-    # Preprocesar según EfficientNetV2
-    img_array = tf.keras.applications.efficientnet_v2.preprocess_input(img_array)
+    # Seleccionar la función de preprocesado según el modelo cargado (si no está, usar efficientnet_v2 por defecto)
+    preprocess_fn = getattr(model_manager, "preprocess_fn", None)
+    if preprocess_fn is None:
+        preprocess_fn = tf.keras.applications.efficientnet_v2.preprocess_input
+    
+    img_array = preprocess_fn(img_array)
     
     return img_array
 
@@ -227,7 +231,7 @@ async def health_check():
     return {
         "status": "healthy" if model_manager.model_loaded else "unhealthy",
         "model_loaded": model_manager.model_loaded,
-        "model_type": "EfficientNetV2S",
+        "model_type": model_manager.model_type or "None",
         "input_size": MODEL_INPUT_SIZE,
         "tensorflow_version": tf.__version__,
         "max_file_size_mb": MAX_FILE_SIZE // (1024 * 1024)
@@ -236,20 +240,16 @@ async def health_check():
 @app.post("/predict")
 async def predict_image(file: UploadFile = File(...)):
     """Endpoint para clasificar una imagen"""
-    
-    # Verificar que el modelo esté cargado
     model = await model_manager.get_model()
     if model is None:
         raise HTTPException(status_code=500, detail="Modelo no disponible")
     
-    # Validar archivo
     if not validate_image_file(file):
         raise HTTPException(
             status_code=400, 
             detail="Archivo inválido. Solo se permiten imágenes (jpg, png, bmp, gif, tiff)"
         )
     
-    # Verificar tamaño del archivo
     contents = await file.read()
     file_size = len(contents)
     
@@ -263,11 +263,9 @@ async def predict_image(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Archivo vacío")
     
     try:
-        # Cargar y procesar imagen
         image = Image.open(io.BytesIO(contents))
         processed_image = await preprocess_image(image)
         
-        # Realizar predicción de forma asíncrona
         logger.info(f"Procesando imagen: {file.filename}")
         loop = asyncio.get_event_loop()
         predictions = await loop.run_in_executor(
@@ -275,7 +273,6 @@ async def predict_image(file: UploadFile = File(...)):
             lambda: model.predict(processed_image, verbose=0)
         )
         
-        # Decodificar resultados
         results = await decode_predictions(predictions, top=5)
         
         return {
