@@ -2,6 +2,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 import tensorflow as tf
 import numpy as np
 from PIL import Image
@@ -528,6 +530,5 @@ if __name__ == "__main__":
         "main:app",  # Usar import string para enable reload
         host="0.0.0.0", 
         port=8000,
-        log_level="info",
-        reload=True
+        log_level="info"
     )
