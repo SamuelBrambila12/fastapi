@@ -474,10 +474,30 @@ def _align(a, b):
 async def pronunciation_evaluate(body: PronunciationRequest):
     target = (body.target or '').strip()
     recognized = (body.recognized or '').strip()
-    if not target or not recognized:
-        raise HTTPException(status_code=400, detail="Campos 'target' y 'recognized' son requeridos")
+    if not target:
+        raise HTTPException(status_code=400, detail="Campo 'target' es requerido")
     try:
         t_ph = _phonemes_for_text(target)
+        # Aceptar evaluación incluso si recognized está vacío: devolver feedback completo
+        if not recognized:
+            feedback = []
+            for i, p in enumerate(t_ph):
+                feedback.append({
+                    "target_phoneme": p,
+                    "heard_phoneme": None,
+                    "index": i,
+                    "hint": "Falta este sonido; asegúrate de pronunciarlo",
+                })
+            return {
+                "success": True,
+                "target": target,
+                "recognized": recognized,
+                "target_phonemes": t_ph,
+                "recognized_phonemes": [],
+                "score": 0.0,
+                "edit_distance": len(t_ph),
+                "feedback": feedback,
+            }
         r_ph = _phonemes_for_text(recognized)
         pairs, score, distance = _align(t_ph, r_ph)
         feedback = []
@@ -499,6 +519,22 @@ async def pronunciation_evaluate(body: PronunciationRequest):
                     fb["hint"] = "Ajusta este sonido para acercarlo al objetivo"
                 feedback.append(fb)
             idx += 1
+        # Si el puntaje es 0, garantizar retroalimentación completa por cada fonema objetivo
+        if score <= 0.0:
+            covered = set()
+            for fb in feedback:
+                try:
+                    covered.add(int(fb.get("index", -1)))
+                except Exception:
+                    pass
+            for i, p in enumerate(t_ph):
+                if i not in covered:
+                    feedback.append({
+                        "target_phoneme": p,
+                        "heard_phoneme": None,
+                        "index": i,
+                        "hint": "Falta este sonido; asegúrate de pronunciarlo",
+                    })
         return {
             "success": True,
             "target": target,
