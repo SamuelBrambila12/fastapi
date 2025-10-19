@@ -3,7 +3,7 @@ uvicorn[standard]==0.24.0
 tensorflow==2.20.0
 pillow==11.1.0
 python-multipart==0.0.6
-numpy==1.24.3
+numpy>=1.26.0,<2.0
 python-dotenv==1.0.0
 nltk==3.8.1
 # Traducción (Helsinki-NLP/opus-mt-en-es)
