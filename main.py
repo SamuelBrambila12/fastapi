@@ -14,16 +14,11 @@ import asyncio
 from pydantic import BaseModel
 from utils.example_generator import generate_examples
 
-# Traducción (Helsinki-NLP/opus-mt-en-es) con carga perezosa
-try:
-    from transformers import MarianMTModel, MarianTokenizer
-    import torch
-    _TRANSFORMERS_AVAILABLE = True
-except Exception as e:
-    _TRANSFORMERS_AVAILABLE = False
-    MarianMTModel = None  # type: ignore
-    MarianTokenizer = None  # type: ignore
-    torch = None  # type: ignore
+# Traducción EN->ES con Argos Translate (ligero)
+from argostranslate import package as argos_package, translate as argos_translate
+# Directorio de paquetes Argos (puede ser persistente vía volumen)
+ARGOS_DATA_DIR = os.environ.get("ARGOS_TRANSLATE_PACKAGE_DIR", os.environ.get("ARGOS_DATA_DIR", "/app/argos_data"))
+os.environ.setdefault("ARGOS_TRANSLATE_PACKAGE_DIR", ARGOS_DATA_DIR)
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -75,66 +70,49 @@ class ModelManager:
 # Instancia global del manejador de modelo
 model_manager = ModelManager()
 
-class TranslatorManager:
+class TranslatorState:
     def __init__(self):
-        self.model = None
-        self.tokenizer = None
-        self.device = 'cpu'
-        self.loaded = False
-        self.loading_lock = asyncio.Lock()
+        self.ready = False
+        self.lock = asyncio.Lock()
 
-    async def load(self):
-        async with self.loading_lock:
-            if self.loaded:
-                return True
-            if not _TRANSFORMERS_AVAILABLE:
-                logger.error("Transformers no disponible para traducción")
-                self.loaded = False
-                return False
-            try:
-                logger.info("Cargando traductor Helsinki-NLP/opus-mt-en-es ...")
-                loop = asyncio.get_event_loop()
-                def _load():
-                    tok = MarianTokenizer.from_pretrained('Helsinki-NLP/opus-mt-en-es')
-                    mdl = MarianMTModel.from_pretrained('Helsinki-NLP/opus-mt-en-es')
-                    dev = 'cuda' if (torch is not None and torch.cuda.is_available()) else 'cpu'
-                    mdl.to(dev)
-                    return tok, mdl, dev
-                tok, mdl, dev = await loop.run_in_executor(None, _load)
-                self.tokenizer = tok
-                self.model = mdl
-                self.device = dev
-                self.loaded = True
-                logger.info("Traductor cargado en dispositivo: %s", self.device)
-                return True
-            except Exception as e:
-                logger.error(f"Error cargando traductor: {e}")
-                self.loaded = False
-                return False
-
-    async def get(self):
-        if not self.loaded:
-            await self.load()
-        if not self.loaded:
-            return None
-        return self
+    async def ensure_ready(self):
+        async with self.lock:
+            if self.ready:
+                return
+            os.makedirs(ARGOS_DATA_DIR, exist_ok=True)
+            # Actualizar índice y asegurar paquete EN->ES instalado
+            argos_package.update_package_index()
+            installed = argos_translate.get_installed_languages()
+            have_en = any(l.code == 'en' for l in installed)
+            have_es = any(l.code == 'es' for l in installed)
+            if not (have_en and have_es):
+                available = argos_package.get_available_packages()
+                candidates = [p for p in available if p.from_code == 'en' and p.to_code == 'es']
+                if not candidates:
+                    raise RuntimeError('No hay paquetes EN->ES disponibles')
+                # Elegir el de mayor tamaño (usualmente mejor calidad)
+                candidates.sort(key=lambda p: getattr(p, 'size', 0), reverse=True)
+                pkg = candidates[0]
+                pkg_path = pkg.download()
+                argos_package.install_from_path(pkg_path)
+            # Verificación final
+            installed = argos_translate.get_installed_languages()
+            _ = next((l for l in installed if l.code == 'en'), None)
+            _ = next((l for l in installed if l.code == 'es'), None)
+            self.ready = True
 
     def translate_batch(self, texts: List[str]) -> List[str]:
-        if not self.loaded or self.model is None or self.tokenizer is None:
-            raise RuntimeError("Translator not loaded")
-        # Sanitizar entradas
-        inputs = [ (t or '').strip() for t in texts ]
-        if not any(inputs):
-            return inputs
-        with torch.no_grad():  # type: ignore
-            batch = self.tokenizer(inputs, return_tensors='pt', padding=True, truncation=True)
-            if self.device != 'cpu':  # mover a GPU si aplica
-                batch = {k: v.to(self.device) for k, v in batch.items()}
-            generated = self.model.generate(**batch, max_length=128, num_beams=4)
-            outputs = [self.tokenizer.decode(t, skip_special_tokens=True) for t in generated]
-            return outputs
+        installed = argos_translate.get_installed_languages()
+        en_lang = next(l for l in installed if l.code == 'en')
+        es_lang = next(l for l in installed if l.code == 'es')
+        translator = en_lang.get_translation(es_lang)
+        out: List[str] = []
+        for t in texts:
+            s = (t or '').strip()
+            out.append('' if not s else translator.translate(s))
+        return out
 
-translator_manager = TranslatorManager()
+translator_state = TranslatorState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -412,31 +390,29 @@ async def predict_batch(files: List[UploadFile] = File(...)):
     successful_predictions = sum(1 for r in processed_results if r["success"])
     
     return {
-    "success": True,
-    "batch_size": len(files),
-    "successful_predictions": successful_predictions,
-    "failed_predictions": len(files) - successful_predictions,
-    "results": processed_results
+        "success": True,
+        "batch_size": len(files),
+        "successful_predictions": successful_predictions,
+        "failed_predictions": len(files) - successful_predictions,
+        "results": processed_results
     }
-    
-    class TranslateRequest(BaseModel):
+
+class TranslateRequest(BaseModel):
     texts: List[str]
-    
-    @app.post("/translate")
-    async def translate_endpoint(body: TranslateRequest):
+
+@app.post("/translate")
+async def translate_endpoint(body: TranslateRequest):
     texts = body.texts or []
     if not texts:
-    raise HTTPException(status_code=400, detail="'texts' no puede estar vacío")
-    tm = await translator_manager.get()
-    if tm is None:
-    raise HTTPException(status_code=500, detail="Modelo de traducción no disponible")
+        raise HTTPException(status_code=400, detail="'texts' no puede estar vacío")
     try:
-    loop = asyncio.get_event_loop()
-    translations = await loop.run_in_executor(None, lambda: tm.translate_batch(texts))
-    return {"success": True, "translations": translations}
+        await translator_state.ensure_ready()
+        loop = asyncio.get_event_loop()
+        translations = await loop.run_in_executor(None, lambda: translator_state.translate_batch(texts))
+        return {"success": True, "translations": translations}
     except Exception as e:
-    logger.error(f"Error traduciendo: {e}")
-    raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error traduciendo: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 async def process_single_image(model, file: UploadFile, current: int, total: int):
     """Procesa una sola imagen para el batch"""
