@@ -1,53 +1,47 @@
-# Dockerfile para FastAPI + TensorFlow + Argos Translate (Python 3.11)
+# Dockerfile mínimo para FastAPI + TensorFlow + Argos Translate (Python 3.11)
 
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PORT=8000 \
     KERAS_HOME=/app/.keras \
     TF_CPP_MIN_LOG_LEVEL=2 \
     ARGOS_TRANSLATE_PACKAGE_DIR=/app/argos_data
 
-# Dependencias del sistema necesarias (Pillow, TensorFlow CPU)
+# Instalar SOLO librerías de runtime (no -dev) para reducir tamaño
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    pkg-config \
-    libjpeg-dev \
-    zlib1g-dev \
-    libpng-dev \
-    libtiff5-dev \
-    libopenblas-dev \
-    wget \
+    libjpeg62-turbo \
+    libpng16-16 \
+    zlib1g \
+    libtiff5 \
+    libopenblas0 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copiar requirements para aprovechar cache de Docker
+# Copiar requirements y preparar pip
 COPY requirements.txt /app/requirements.txt
-
 RUN pip install --upgrade pip setuptools wheel
 
-# Forzar una versión de numpy compatible antes de instalar TF (evita conflictos)
+# Preinstalar numpy compatible con TF (acelera resolución y evita compilación)
 RUN pip install --no-cache-dir "numpy>=1.26.0,<1.27"
 
-# Instalar dependencias del proyecto (requirements.txt NO debe fijar numpy si haces lo anterior)
+# Instalar dependencias del proyecto (incluye TensorFlow y Argos Translate)
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copiar el código fuente (main.py y utilidades deben estar en la raíz del contexto)
+# Copiar el código fuente (main.py en /app)
 COPY . /app
 
-# Crear directorios de caché (Keras y Argos)
+# Directorios de caché (montables como volumen si deseas persistir)
 RUN mkdir -p /app/.keras /app/argos_data
 
-# PRE-DOWNLOAD opcional: descargar pesos del modelo y datasets de NLTK durante el build.
-# Para minimizar tamaño de la imagen, puedes comentar estas dos líneas y permitir descarga en el primer arranque.
-RUN python -c "import os; os.makedirs(os.environ.get('KERAS_HOME','/app/.keras'), exist_ok=True); print('KERAS_HOME =', os.environ.get('KERAS_HOME')); import tensorflow as tf; from tensorflow.keras.applications import EfficientNetV2L; print('-> Descargando EfficientNetV2L weights (ImageNet)...'); EfficientNetV2L(weights='imagenet', include_top=True, input_shape=(480,480,3)); print('-> Pesos descargados.')" || true
-RUN python -c "import nltk; nltk.download('wordnet'); nltk.download('omw-1.4'); print('-> NLTK datasets descargados.')" || true
+# NOTA: Evitamos pre-descargar pesos de EfficientNetV2-L y datasets NLTK en build
+# para mantener la imagen < 4GB. Se descargarán en el primer arranque si son necesarios.
 
 EXPOSE ${PORT}
 
-# Ejecutar uvicorn (usa la variable PORT inyectada por Railway al deploy)
-# Asegúrate de que main.py esté en /app y defina `app = FastAPI(...)`
+# Ejecutar Uvicorn (main.py debe definir app = FastAPI(...))
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT} --loop asyncio --workers 1"]
