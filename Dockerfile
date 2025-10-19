@@ -10,13 +10,8 @@ ENV PYTHONUNBUFFERED=1 \
     TF_CPP_MIN_LOG_LEVEL=2 \
     ARGOS_TRANSLATE_PACKAGE_DIR=/app/argos_data
 
-# Instalar SOLO librerías de runtime (no -dev) para reducir tamaño
+# Instalar solo certificados (evita paquetes de sistema que varían por distro y rompen el build)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libjpeg62-turbo \
-    libpng16-16 \
-    zlib1g \
-    libtiff5 \
-    libopenblas0 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
