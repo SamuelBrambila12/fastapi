@@ -41,31 +41,10 @@ COPY . /app
 # Crear directorios de caché (Keras y Argos)
 RUN mkdir -p /app/.keras /app/argos_data
 
-# PRE-DOWNLOAD: descargar pesos del modelo y datasets de NLTK durante el build
-# (se guardarán bajo /app/.keras gracias a KERAS_HOME). Esta sección es opcional; 
-# si quieres minimizar el tamaño de la imagen, puedes comentarla para descargar en tiempo de ejecución.
-RUN python - << 'PY'
-import os
-print("KERAS_HOME =", os.environ.get("KERAS_HOME"))
-os.makedirs(os.environ.get("KERAS_HOME", "/app/.keras"), exist_ok=True)
-# Intentar descargar el modelo (puede tardar)
-try:
-    from tensorflow.keras.applications import EfficientNetV2L
-    print("-> Descargando EfficientNetV2L weights (ImageNet)... esto puede tardar un poco")
-    _ = EfficientNetV2L(weights='imagenet', include_top=True, input_shape=(480,480,3))
-    print("-> Pesos descargados correctamente.")
-except Exception as e:
-    # No fallar el build si hay problemas de red; solo avisar
-    print("Warning: fallo descargando pesos del modelo en build:", e)
-# Descargar data de NLTK usada en runtime (wordnet, omw-1.4)
-try:
-    import nltk
-    nltk.download('wordnet')
-    nltk.download('omw-1.4')
-    print("-> NLTK datasets descargados.")
-except Exception as e:
-    print("Warning: fallo descargando NLTK durante build:", e)
-PY
+# PRE-DOWNLOAD opcional: descargar pesos del modelo y datasets de NLTK durante el build.
+# Para minimizar tamaño de la imagen, puedes comentar estas dos líneas y permitir descarga en el primer arranque.
+RUN python -c "import os; os.makedirs(os.environ.get('KERAS_HOME','/app/.keras'), exist_ok=True); print('KERAS_HOME =', os.environ.get('KERAS_HOME')); import tensorflow as tf; from tensorflow.keras.applications import EfficientNetV2L; print('-> Descargando EfficientNetV2L weights (ImageNet)...'); EfficientNetV2L(weights='imagenet', include_top=True, input_shape=(480,480,3)); print('-> Pesos descargados.')" || true
+RUN python -c "import nltk; nltk.download('wordnet'); nltk.download('omw-1.4'); print('-> NLTK datasets descargados.')" || true
 
 EXPOSE ${PORT}
 
