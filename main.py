@@ -14,11 +14,6 @@ import asyncio
 from pydantic import BaseModel
 from utils.example_generator import generate_examples
 
-# Traducción EN->ES con Argos Translate (ligero)
-from argostranslate import package as argos_package, translate as argos_translate
-# Directorio de paquetes Argos (puede ser persistente vía volumen)
-ARGOS_DATA_DIR = os.environ.get("ARGOS_TRANSLATE_PACKAGE_DIR", os.environ.get("ARGOS_DATA_DIR", "/app/argos_data"))
-os.environ.setdefault("ARGOS_TRANSLATE_PACKAGE_DIR", ARGOS_DATA_DIR)
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -70,49 +65,6 @@ class ModelManager:
 # Instancia global del manejador de modelo
 model_manager = ModelManager()
 
-class TranslatorState:
-    def __init__(self):
-        self.ready = False
-        self.lock = asyncio.Lock()
-
-    async def ensure_ready(self):
-        async with self.lock:
-            if self.ready:
-                return
-            os.makedirs(ARGOS_DATA_DIR, exist_ok=True)
-            # Actualizar índice y asegurar paquete EN->ES instalado
-            argos_package.update_package_index()
-            installed = argos_translate.get_installed_languages()
-            have_en = any(l.code == 'en' for l in installed)
-            have_es = any(l.code == 'es' for l in installed)
-            if not (have_en and have_es):
-                available = argos_package.get_available_packages()
-                candidates = [p for p in available if p.from_code == 'en' and p.to_code == 'es']
-                if not candidates:
-                    raise RuntimeError('No hay paquetes EN->ES disponibles')
-                # Elegir el de mayor tamaño (usualmente mejor calidad)
-                candidates.sort(key=lambda p: getattr(p, 'size', 0), reverse=True)
-                pkg = candidates[0]
-                pkg_path = pkg.download()
-                argos_package.install_from_path(pkg_path)
-            # Verificación final
-            installed = argos_translate.get_installed_languages()
-            _ = next((l for l in installed if l.code == 'en'), None)
-            _ = next((l for l in installed if l.code == 'es'), None)
-            self.ready = True
-
-    def translate_batch(self, texts: List[str]) -> List[str]:
-        installed = argos_translate.get_installed_languages()
-        en_lang = next(l for l in installed if l.code == 'en')
-        es_lang = next(l for l in installed if l.code == 'es')
-        translator = en_lang.get_translation(es_lang)
-        out: List[str] = []
-        for t in texts:
-            s = (t or '').strip()
-            out.append('' if not s else translator.translate(s))
-        return out
-
-translator_state = TranslatorState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -249,7 +201,6 @@ async def root():
             "predict": "/predict",
             "predict_batch": "/predict/batch",
             "examples": "/examples",
-            "translate": "/translate",
             "docs": "/docs",
             "redoc": "/redoc"
         }
@@ -399,22 +350,6 @@ async def predict_batch(files: List[UploadFile] = File(...)):
         "results": processed_results
     }
 
-class TranslateRequest(BaseModel):
-    texts: List[str]
-
-@app.post("/translate")
-async def translate_endpoint(body: TranslateRequest):
-    texts = body.texts or []
-    if not texts:
-        raise HTTPException(status_code=400, detail="'texts' no puede estar vacío")
-    try:
-        await translator_state.ensure_ready()
-        loop = asyncio.get_event_loop()
-        translations = await loop.run_in_executor(None, lambda: translator_state.translate_batch(texts))
-        return {"success": True, "translations": translations}
-    except Exception as e:
-        logger.error(f"Error traduciendo: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 async def process_single_image(model, file: UploadFile, current: int, total: int):
     """Procesa una sola imagen para el batch"""
