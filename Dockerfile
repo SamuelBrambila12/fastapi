@@ -1,4 +1,4 @@
- Dockerfile para FastAPI + TensorFlow (Python 3.11)
+# Dockerfile para FastAPI + TensorFlow (Python 3.11)
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
