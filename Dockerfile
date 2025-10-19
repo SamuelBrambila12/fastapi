@@ -6,18 +6,20 @@ ENV PIP_NO_CACHE_DIR=1
 ENV PORT=8000
 ENV KERAS_HOME=/app/.keras
 ENV TF_CPP_MIN_LOG_LEVEL=2
+ENV CUDA_VISIBLE_DEVICES=-1
+ENV TF_NUM_INTRAOP_THREADS=2
+ENV TF_NUM_INTEROP_THREADS=2
+ENV OMP_NUM_THREADS=2
 
-# Dependencias del sistema necesarias
+# Dependencias del sistema necesarias (runtime mínimas)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    pkg-config \
-    libjpeg-dev \
-    zlib1g-dev \
-    libpng-dev \
-    libtiff5-dev \
-    libopenblas-dev \
-    wget \
     ca-certificates \
+    libstdc++6 \
+    libgomp1 \
+    libjpeg62-turbo \
+    zlib1g \
+    libpng16-16 \
+    libtiff5 \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -36,31 +38,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar el código fuente
 COPY . .
 
-# PRE-DOWNLOAD: descargar pesos del modelo y datasets de NLTK durante el build
-# (se guardarán bajo /app/.keras gracias a KERAS_HOME)
-RUN python - <<'PY'
-import os
-os.makedirs(os.environ.get("KERAS_HOME", "/app/.keras"), exist_ok=True)
-print("KERAS_HOME =", os.environ.get("KERAS_HOME"))
-# Intentar descargar el modelo (puede tardar varios minutos dependiendo de la red)
-try:
-    from tensorflow.keras.applications import EfficientNetV2L
-    print("-> Descargando EfficientNetV2L weights (ImageNet)... esto puede tardar un poco")
-    EfficientNetV2L(weights='imagenet', include_top=True, input_shape=(480,480,3))
-    print("-> Pesos descargados correctamente.")
-except Exception as e:
-    # No fallar el build si hay problemas de red; solo avisar
-    print("Warning: fallo descargando pesos del modelo en build:", e)
+# Crear directorio de caché de Keras en build (evita problemas de permisos)
+RUN mkdir -p /app/.keras
 
-# Descargar data de NLTK que usas en runtime (wordnet, omw-1.4)
-try:
-    import nltk
-    nltk.download('wordnet')
-    nltk.download('omw-1.4')
-    print("-> NLTK datasets descargados.")
-except Exception as e:
-    print("Warning: fallo descargando NLTK durante build:", e)
-PY
+# Nota: Evitamos pre-descargar pesos/modelos/datasets en build para reducir RAM/tiempo; 
+# se descargarán en runtime bajo KERAS_HOME cuando el código los necesite.
 
 EXPOSE ${PORT}
 
