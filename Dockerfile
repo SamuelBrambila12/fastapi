@@ -1,59 +1,69 @@
-# Dockerfile para FastAPI + TensorFlow (Python 3.11)
+# syntax=docker/dockerfile:1
 FROM python:3.11-slim
 
-ENV PYTHONUNBUFFERED=1
-ENV PIP_NO_CACHE_DIR=1
-ENV PORT=8000
-ENV KERAS_HOME=/app/.keras
-ENV TF_CPP_MIN_LOG_LEVEL=2
+# --- Entornos y ajuste de paralelismo para CPU (2 vCPU) ---
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PORT=8000 \
+    KERAS_HOME=/app/.keras \
+    TF_CPP_MIN_LOG_LEVEL=2 \
+    # Limitar hilos para OpenBLAS, MKL, TensorFlow, etc. -> evita oversubscription en 2 vCPU
+    OMP_NUM_THREADS=2 \
+    MKL_NUM_THREADS=2 \
+    OPENBLAS_NUM_THREADS=2 \
+    NUMEXPR_NUM_THREADS=2 \
+    TF_NUM_INTRAOP_THREADS=2 \
+    TF_NUM_INTEROP_THREADS=1 \
+    # Ajustable: workers para uvicorn (por defecto 1, puedes subir a 2 si necesitas más concurrencia)
+    UVICORN_WORKERS=1
 
-# Dependencias del sistema necesarias
+WORKDIR /app
+
+# --- Dependencias del sistema (mínimas) ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
+    wget \
+    ca-certificates \
     libjpeg-dev \
     zlib1g-dev \
     libpng-dev \
     libtiff5-dev \
     libopenblas-dev \
-    wget \
-    ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# Copiar requirements primero para cache de Docker
+COPY requirements.txt /app/requirements.txt
 
-# Copiar requirements para aprovechar cache de Docker
-COPY requirements.txt .
+# Actualizar pip y preinstalar numpy compatible con TF (evita recompilaciones)
+RUN python -m pip install --upgrade pip setuptools wheel \
+ && python -m pip install --no-cache-dir "numpy>=1.26.0,<1.27"
 
-RUN pip install --upgrade pip setuptools wheel
+# Instalar dependencias del proyecto
+RUN python -m pip install --no-cache-dir -r /app/requirements.txt
 
-# Forzar una versión de numpy compatible antes de instalar TF (evita conflictos)
-RUN pip install --no-cache-dir "numpy>=1.26.0,<1.27"
+# Copiar código (al final para aprovechar cache)
+COPY . /app
 
-# Instalar dependencias del proyecto (requirements.txt no debe contener numpy si haces lo anterior)
-RUN pip install --no-cache-dir -r requirements.txt
+# Crear directorios de cache para Keras/weights (montables como volúmenes si quieres persistir)
+RUN mkdir -p /app/.keras /app/argos_data && chmod -R 755 /app/.keras /app/argos_data
 
-# Copiar el código fuente
-COPY . .
-
-# PRE-DOWNLOAD: descargar pesos del modelo y datasets de NLTK durante el build
-# (se guardarán bajo /app/.keras gracias a KERAS_HOME)
+# (Opcional) Intento de pre-descarga seguro: no falla el build si hay problemas de red.
+# Ten en cuenta que descargar pesos grandes en build aumenta mucho el tamaño de la imagen.
 RUN python - <<'PY'
 import os
 os.makedirs(os.environ.get("KERAS_HOME", "/app/.keras"), exist_ok=True)
 print("KERAS_HOME =", os.environ.get("KERAS_HOME"))
-# Intentar descargar el modelo (puede tardar varios minutos dependiendo de la red)
 try:
+    # Sólo intenta si TensorFlow y Keras ya están instalados en la imagen
     from tensorflow.keras.applications import EfficientNetV2L
-    print("-> Descargando EfficientNetV2L weights (ImageNet)... esto puede tardar un poco")
+    print("-> Intentando descargar EfficientNetV2L weights (ImageNet)...")
     EfficientNetV2L(weights='imagenet', include_top=True, input_shape=(480,480,3))
-    print("-> Pesos descargados correctamente.")
+    print("-> Pesos descargados correctamente (se guardarán en KERAS_HOME).")
 except Exception as e:
-    # No fallar el build si hay problemas de red; solo avisar
-    print("Warning: fallo descargando pesos del modelo en build:", e)
+    print("Warning: no se descargaron pesos en build (esto es intencional para mantener imagen pequeña):", e)
 
-
-# Descargar data de NLTK que usas en runtime (wordnet, omw-1.4)
 try:
     import nltk
     nltk.download('wordnet')
@@ -65,6 +75,6 @@ PY
 
 EXPOSE ${PORT}
 
-# Ejecutar Uvicorn (main.py debe definir app = FastAPI(...))
-# Ejecutar uvicorn (usa la variable PORT inyectada por Railway al deploy)
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT} --loop asyncio --workers 1"]
+# CMD: uvicorn. UVICORN_WORKERS configurable desde Railway: e.g. set UVICORN_WORKERS=2 si quieres 2 procesos.
+# Recomendación para 2 vCPU: mantener UVICORN_WORKERS=1 y controlar hilos (cooperativo + TF) o probar 2 si observas que 1 se queda corto.
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT} --loop asyncio --workers ${UVICORN_WORKERS}"]
