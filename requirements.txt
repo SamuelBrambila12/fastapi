@@ -1,7 +1,17 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
-tensorflow-cpu==2.20.0
+tensorflow==2.20.0
 pillow==11.1.0
 python-multipart==0.0.6
+numpy==1.24.3
 python-dotenv==1.0.0
 nltk==3.8.1
+# Traducción (Helsinki-NLP/opus-mt-en-es)
+transformers==4.44.2
+sentencepiece==0.2.0
+sacremoses==0.1.1
+# Para CPU-only en servidores sin GPU, usa torch CPU. Si utilizas GPU, ajusta a la build CUDA correspondiente.
+# En muchos PaaS (Railway/Render) se recomienda CPU-only:
+torch==2.2.2
+# Opcional para mejorar descargas/caché del hub de HuggingFace
+huggingface_hub[hf_xet]==0.24.5
