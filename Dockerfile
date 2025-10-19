@@ -41,6 +41,30 @@ COPY . .
 # Crear directorio de caché de Keras en build (evita problemas de permisos)
 RUN mkdir -p /app/.keras
 
+# Pre-descargar pesos del modelo y datasets NLTK para runtime rápido
+RUN python - <<'PY'
+import os
+os.makedirs(os.environ.get("KERAS_HOME", "/app/.keras"), exist_ok=True)
+print("KERAS_HOME =", os.environ.get("KERAS_HOME"))
+# Intentar descargar EfficientNetV2L (ImageNet)
+try:
+    from tensorflow.keras.applications import EfficientNetV2L
+    print("-> Descargando EfficientNetV2L (ImageNet) en build...")
+    EfficientNetV2L(weights='imagenet', include_top=True, input_shape=(480,480,3))
+    print("-> Pesos descargados OK.")
+except Exception as e:
+    print("Warning: fallo descargando EfficientNetV2L en build:", e)
+
+# Descargar data de NLTK usada en runtime (wordnet, omw-1.4)
+try:
+    import nltk
+    nltk.download('wordnet')
+    nltk.download('omw-1.4')
+    print("-> NLTK datasets descargados.")
+except Exception as e:
+    print("Warning: fallo descargando NLTK en build:", e)
+PY
+
 # Nota: Evitamos pre-descargar pesos/modelos/datasets en build para reducir RAM/tiempo; 
 # se descargarán en runtime bajo KERAS_HOME cuando el código los necesite.
 
